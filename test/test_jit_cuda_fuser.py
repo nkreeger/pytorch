@@ -14,9 +14,8 @@ from torch.nn import functional
 from torch.testing._internal.common_utils import run_tests, ProfilingMode, GRAPH_EXECUTOR  # TEST_WITH_ROCM
 from torch.testing._internal.common_cuda import TEST_MULTIGPU
 from torch.testing._internal.codegen.random_topo_test import runDefaultTestWithSeed
+from torch.testing._internal.jit_utils import JitTestCase, RUN_CUDA
 from torch.testing import FileCheck
-
-from test_jit import JitTestCase, RUN_CUDA
 
 from jit.test_fuser_common import TestFuserCommon  # noqa: F401
 
@@ -28,7 +27,10 @@ from torch.autograd.gradcheck import gradcheck
 
 from typing import List
 
-CUDA_MAJOR, CUDA_MINOR = (int(x) for x in torch.version.cuda.split('.'))
+CUDA_MAJOR, CUDA_MINOR = 0, 0
+
+if RUN_CUDA and torch.version.cuda is not None:
+    CUDA_MAJOR, CUDA_MINOR = (int(x) for x in torch.version.cuda.split('.'))
 
 os.environ['PYTORCH_NVFUSER_DISABLE_FALLBACK'] = '1'
 os.environ['PYTORCH_NVFUSER_DISABLE_FMA'] = '1'
@@ -63,38 +65,14 @@ def nvfuser_horizontal_fusion(flag):
         torch._C._jit_set_nvfuser_horizontal_mode(old_value)
 
 def is_pre_volta():
+    if not RUN_CUDA:
+        return False
     prop = torch.cuda.get_device_properties(torch.cuda.current_device())
     return prop.major < 7
 
-TEST_BF16 = torch.cuda.is_bf16_supported()
+TEST_BF16 = RUN_CUDA and torch.cuda.is_bf16_supported()
 
 class TestCudaFuser(JitTestCase):
-
-    special_values = torch.tensor(
-        [float("-inf"), -10, -math.pi,
-            -1, -0.5, 0, 1, 0.5,
-            math.pi, 10, float("inf"),
-            float("nan")], dtype=torch.float, device='cuda')
-
-    int_types = [
-        torch.int8,
-        torch.uint8,
-        torch.int16,
-        torch.int32,
-        torch.int64
-    ]
-
-    support_tensor_dtypes = [
-        torch.int32,
-        torch.int64,
-        torch.float16,
-        torch.float32,
-        torch.float64,
-        torch.bool
-    ]
-    if TEST_BF16:
-        support_tensor_dtypes.append(torch.bfloat16)
-
     def _getSubgraphInFusion(self, graph):
         num_node = 0
         subgraph = None
@@ -114,6 +92,34 @@ class TestCudaFuser(JitTestCase):
 
     def setUp(self):
         super(TestCudaFuser, self).setUp()
+
+        # cpu backup to avoid errors in case this is run on a CPU-only machine
+        dev = 'cuda' if RUN_CUDA else 'cpu'
+        self.special_values = torch.tensor(
+            [float("-inf"), -10, -math.pi,
+                -1, -0.5, 0, 1, 0.5,
+                math.pi, 10, float("inf"),
+                float("nan")], dtype=torch.float, device=dev)
+
+        self.int_types = [
+            torch.int8,
+            torch.uint8,
+            torch.int16,
+            torch.int32,
+            torch.int64
+        ]
+
+        self.support_tensor_dtypes = [
+            torch.int32,
+            torch.int64,
+            torch.float16,
+            torch.float32,
+            torch.float64,
+            torch.bool
+        ]
+        if TEST_BF16:
+            self.support_tensor_dtypes.append(torch.bfloat16)
+
         self.old_cpu_fuse = torch._C._jit_can_fuse_on_cpu()
         self.old_gpu_fuse = torch._C._jit_can_fuse_on_gpu()
         torch._C._jit_override_can_fuse_on_cpu(False)
@@ -561,6 +567,7 @@ class TestCudaFuser(JitTestCase):
             self._unary_test_helper(op, dtype, False)  # test special numbers
             self._unary_test_helper(op, dtype, True)  # test random data
 
+    @unittest.expectedFailure  # see issue 73395
     @unittest.skipIf(not RUN_CUDA, "requires CUDA")
     @unittest.skipIf(GRAPH_EXECUTOR != ProfilingMode.PROFILING,
                      "Requires fusion optimization pass to be effective")
